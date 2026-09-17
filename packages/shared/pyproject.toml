@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resq-shared"
+version = "0.1.0"
+description = "Shared types, HMAC utils, and severity constants for resQ Siren services"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.5",
+    "redis>=5.0",
+    "sqlalchemy>=2.0",
+    "fastapi>=0.110",
+]
+
+[tool.setuptools.packages.find]
+include = ["resq_shared*"]

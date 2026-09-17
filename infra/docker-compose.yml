@@ -1,0 +1,100 @@
+x-hmac-secret: &hmac_secret "dev-secret-change-me"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: resq_v2
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_v2_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  routing:
+    build:
+      context: ..
+      dockerfile: services/routing/Dockerfile
+    ports:
+      - "4102:4102"
+    environment:
+      ROUTING_OSRM_BASE_URL: ""
+
+  dispatch:
+    build:
+      context: ..
+      dockerfile: services/dispatch/Dockerfile
+    ports:
+      - "4101:4101"
+    environment:
+      DISPATCH_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/resq_v2
+      DISPATCH_REDIS_URL: redis://redis:6379/0
+      DISPATCH_ROUTING_SERVICE_URL: http://routing:4102
+      DISPATCH_DISPATCH_HMAC_SECRET: *hmac_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      routing:
+        condition: service_started
+
+  signal-command:
+    build:
+      context: ..
+      dockerfile: services/signal-command/Dockerfile
+    ports:
+      - "4104:4104"
+    environment:
+      SIGNAL_REDIS_URL: redis://redis:6379/0
+      SIGNAL_DISPATCH_HMAC_SECRET: *hmac_secret
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  conflict-resolution:
+    build:
+      context: ..
+      dockerfile: services/conflict-resolution/Dockerfile
+    ports:
+      - "4103:4103"
+    environment:
+      CONFLICT_REDIS_URL: redis://redis:6379/0
+      CONFLICT_DISPATCH_HMAC_SECRET: *hmac_secret
+      CONFLICT_SIGNAL_COMMAND_URL: http://signal-command:4104
+    depends_on:
+      redis:
+        condition: service_healthy
+      signal-command:
+        condition: service_started
+
+  notifications:
+    build:
+      context: ..
+      dockerfile: services/notifications/Dockerfile
+    ports:
+      - "4105:4105"
+    environment:
+      NOTIFY_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_v2_data:

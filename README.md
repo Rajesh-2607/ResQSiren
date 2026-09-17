@@ -1,178 +1,205 @@
 # resQ Siren — Smart Ambulance Corridor
 
-SIH 2026 Problem Statement 25132. The product: **"I tell ResQ what happened and where I am. ResQ
-takes care of getting the ambulance to me, getting me to the right hospital, showing me what is
-happening, and helping the ambulance get there as quickly as possible."**
+**Smart India Hackathon 2026 — Problem Statement ID 25132**
+Theme: Miscellaneous · Category: Software
 
-Open `http://localhost:5173/` — no login — pick what's wrong, share your location, and resQ Siren:
-auto-picks the nearest available ambulance and nearest hospital, HMAC-signs the dispatch,
-computes the real fastest route, generates a patient summary for the receiving hospital, and
-shows you a live map with the ambulance's real GPS position as it approaches. If the hospital
-can't take the patient, it auto-reroutes to the next-nearest one and updates your screen live —
-no page refresh, no phone call. Severity-weighted signal pre-emption at contested junctions still
-runs underneath this exactly as before.
+## Problem
 
-The frontend is now caller-only by design — `/` (Emergency Request) and `/driver/:dispatchId`
-(GPS-share page) are the only two pages. The backend's staff API surface (JWT login, dispatcher/
-police/hospital roles, manual call+dispatch creation, junction pre-emption, hospital accept/
-decline) is unchanged and still fully tested — it's just no longer fronted by a dashboard UI; see
-"The original staff-triggered flow" below for exercising it directly.
+Ambulances lose 15–20 critical minutes navigating Indian traffic. Existing
+"green corridor" efforts rely on manual police coordination or basic vehicle
+detection, and they break down exactly when it matters most, because they have
+three structural gaps:
 
-| Layer | Stack |
+1. **No severity awareness** — every ambulance is treated the same, whether
+   it's carrying a cardiac arrest patient or a stable transfer.
+2. **No conflict resolution** — systems assume one ambulance at a time; real
+   cities have multiple emergencies converging on the same junction.
+3. **No verification** — signal-priority requests can't be authenticated,
+   leaving them open to spoofing and misuse.
+
+## Solution, in one line
+
+A dispatcher-triggered, severity-weighted, authenticated traffic corridor
+that dynamically routes ambulances and arbitrates between competing
+emergencies at shared junctions. Severity is generated once at call intake
+and drives every downstream decision — routing, signal alerts, priority, and
+post-trip performance tracking.
+
+## Core design principle
+
+The platform is **event-driven, not request/response**. A junction doesn't
+ask a service what to do — it subscribes to a stream of signed "ambulance
+approaching" events, and a small arbitration engine decides who gets
+priority. This is what makes conflict resolution and spoof-resistance
+possible; a request/response model can't express "two ambulances just
+claimed the same junction."
+
+## Architecture
+
+```
+                        ┌─────────────────────────────────────────┐
+                        │            resQ Siren platform           │
+                        │                                          │
+   Call intake ──────►  │  ┌────────────┐  ┌──────────┐  ┌───────┐ │  ──────► Signals
+   (108/112)            │  │Client apps │  │Data&state│  │ Core  │ │           & hospitals
+                        │  │            │◄─┤          │◄─┤services│ │
+                        │  └────────────┘  └──────────┘  └───────┘ │
+                        │                        ▲            │    │
+                        │                        └── events ──┘    │
+                        └─────────────────────────────────────────┘
+```
+
+### Client apps
+- Dispatcher console (web) — call intake, severity assignment, live map
+- Ambulance driver app (mobile) — turn-by-turn routing, one-tap status
+- Hospital ER dashboard — advance alerts with severity + ABHA summary
+- Police / traffic officer terminal — junction status, manual override
+
+### Core services (event-driven)
+- **Dispatch service** — call intake, severity scoring (Red/Yellow/Green),
+  signs each dispatch record
+- **Conflict resolution engine** — the differentiator. See below.
+- **Routing service** — fastest-path calculation, re-routes on live traffic
+- **Signal command service** — verifies signatures, emits pre-emption
+  commands to the (mocked, then real) ITMS layer
+- **Notification service** — hospital alerts, police alerts, public notices
+
+### Data & state
+- **PostgreSQL** — trips, dispatch records, ABHA consent tokens, audit log
+- **Redis** — live geospatial positions, active junction claims (short-lived)
+
+### External integrations
+- ABHA (consent-gated health record access)
+- Maps/routing provider (Google Maps or OSRM self-hosted fallback)
+- Mock ITMS junction service now → pluggable adapter for real hardware later
+- Firebase Cloud Messaging + Twilio SMS for notifications
+
+## Conflict resolution — the core algorithm
+
+When two or more ambulances claim the same junction within a short window:
+
+```
+score = severity_weight × 100 + wait_seconds
+```
+
+- Red > Yellow > Green by default, regardless of arrival order
+- A lower-severity ambulance that has waited long enough eventually
+  outranks a fresh higher-severity claim — this prevents starvation
+- The highest score gets the pre-emption; others are queued and re-scored
+  every tick until they clear or win
+
+## Authentication & consent
+
+- **Dispatch signing**: every dispatch record is HMAC-signed the moment
+  severity is assigned. The signal command service checks this signature
+  against the dispatch record before emitting anything to ITMS — an
+  unsigned or spoofed "approaching" ping is rejected outright.
+- **ABHA consent**: captured at call intake via an explicit dispatcher
+  toggle ("attendant consent given"), which mints a short-lived ABHA
+  access token. No toggle → no health record fetch. Routing and priority
+  work identically either way.
+
+## Tech stack
+
+| Layer | Choice |
 |---|---|
-| Backend framework | **FastAPI** (Python) |
-| Database | **PostgreSQL** via SQLAlchemy (async) — `hospitals`, `calls`, `dispatches`, `trips` |
-| Cache / live state | **Redis** — per-junction pre-emption claims, live ambulance GPS pings (30s TTL) |
-| Real-time | **Socket.IO** (`python-socketio`, ASGI-mounted alongside FastAPI) |
-| Auth | **JWT** (role-based: dispatcher/police/hospital/admin) **+ HMAC** dispatch-record signing — the public caller/driver endpoints are intentionally unauthenticated, same as calling 108 needs no account |
-| Maps & routing | **OSRM** (public demo server by default, self-hostable), Mapbox Directions API wrapper |
-| Patient summary | **Gemini API** (`gemini-2.5-flash`) — generates the ER handoff brief, falls back to a deterministic template if no key is set |
-| Notifications | Twilio (SMS) wired to dispatch; **SMTP email** (patient report auto-sent to the assigned hospital's contact address on dispatch/reroute); Firebase Cloud Messaging (push) — see stub note below |
-| Live GPS | Browser `navigator.geolocation` (both the caller's page and a driver-tracker page), relayed via Redis + Socket.IO, rendered with **Leaflet** + OpenStreetMap tiles |
-| Infra | Dockerfile + docker-compose (Postgres, Redis, API), GitHub Actions CI |
-| Web dashboard | React + Vite + TypeScript + Tailwind, `socket.io-client` |
+| Frontend | React.js + Tailwind CSS |
+| Mobile | React Native / Flutter (driver app) |
+| Backend | Node.js (NestJS) or FastAPI |
+| Real-time | Socket.IO / WebSockets |
+| Auth | JWT (session) + HMAC (dispatch signing) |
+| Database | PostgreSQL (persistent), Redis (live geospatial + claims) |
+| Maps & routing | Google Maps / Mapbox API, OSRM self-hosted fallback |
+| Signal integration | Mock ITMS junction service now, RFID/GPS-geofence later |
+| Notifications | Firebase Cloud Messaging, Twilio SMS |
+| Hosting & CI/CD | Vercel / Render / Supabase, GitHub Actions |
 
-JWT and HMAC do two different jobs:
-- **JWT** authenticates a human hitting the staff API directly (`POST /auth/login`) and carries their role — dispatcher/police/hospital/admin. No dashboard fronts this anymore; it's exercised via `curl` (see below).
-- **HMAC** authenticates a `Dispatch` record itself, so a junction can verify a signal-priority request really traces back to a real, unmodified dispatch — independent of who's logged in. This is what stops signal-request spoofing from the problem statement.
+## Repo structure
 
-## Run it (Docker)
+This repo now holds two tracks. **`apps/api` + `apps/web-dashboard`** is a
+working FastAPI monolith + citizen-request web app (call intake, severity,
+routing, arbitration, HMAC signing, and notifications all in one service —
+see its own `docker-compose.yml` at the repo root). **Everything below** is
+the microservice architecture this document originally sketched, built as a
+separate track alongside it — same ideas, split into real services:
 
-```bash
-docker compose up --build
-# Postgres on 5432, Redis on 6379, API on 4000
+```
+resq-siren/
+├── apps/
+│   ├── api/                     # v1 monolith (FastAPI + Socket.IO)
+│   ├── web-dashboard/           # v1 citizen request + driver tracker (React)
+│   ├── dispatcher-console/      # v2 dispatcher web app (React)
+│   ├── driver-app/              # v2 minimal driver web app (React)
+│   └── hospital-dashboard/      # v2 hospital ER dashboard (React)
+├── services/                    # v2 only
+│   ├── dispatch/                # intake, severity scoring, signing
+│   ├── conflict-resolution/     # junction arbitration engine
+│   ├── routing/                 # path optimization
+│   ├── signal-command/          # signature verification + mock ITMS
+│   └── notifications/           # notification log (mocked; no real FCM/Twilio yet)
+├── packages/
+│   └── shared/                  # v2: types, HMAC utils, severity constants, event bus
+├── infra/
+│   └── docker-compose.yml       # v2: postgres, redis, all 5 services
+├── docker-compose.yml           # v1: postgres, redis, api
+└── docs/
+    └── architecture.md          # v2 architecture, event flow, run instructions
 ```
 
-## Run the API locally without Docker
+Full run instructions, the event contract, and the trust-boundary design for
+the v2 platform are in [`docs/architecture.md`](docs/architecture.md).
+
+## Getting started
+
+### v2 platform (microservices)
 
 ```bash
-cd apps/api
-python -m venv .venv
-./.venv/Scripts/activate   # or `source .venv/bin/activate` on macOS/Linux
-pip install -r requirements.txt
-cp .env.example .env       # make sure Postgres and Redis are running and .env points at them
-uvicorn app.main:app --reload --port 4000
+# backend: postgres, redis, and all 5 services
+docker compose -f infra/docker-compose.yml up -d --build
+
+# frontends (each needs its own install once)
+cd apps/dispatcher-console && cp .env.example .env && npm install && npm run dev   # :5180
+cd apps/driver-app          && cp .env.example .env && npm install && npm run dev   # :5181
+cd apps/hospital-dashboard  && cp .env.example .env && npm install && npm run dev   # :5182
 ```
 
-## Run the web dashboard
+See [`docs/architecture.md`](docs/architecture.md) for the demo scenario
+(triggering two ambulances converging on a junction) and local non-Docker dev.
+
+### v1 monolith
 
 ```bash
-cd apps/web-dashboard
-npm install
-npm run dev
-# http://localhost:5173/            — public caller flow ("Get help now")
-# http://localhost:5173/driver/<id> — public driver GPS-share page for a dispatch
-```
-There is no staff UI — the dispatcher/police/hospital-facing API endpoints below are exercised
-directly with `curl`.
-
-## The caller flow, verified live
-
-```bash
-# Public, no auth — "I tell ResQ what happened and where I am"
-curl -X POST localhost:4000/emergency -H "Content-Type: application/json" \
-  -d '{"symptom":"CARDIAC_OR_UNCONSCIOUS","lat":13.0850,"lng":80.2101,"notes":"55yo male, sudden collapse"}'
-# -> auto-picks nearest available ambulance + nearest hospital, HMAC-signs the
-#    dispatch, computes a real Mapbox/OSRM route, generates a patient summary,
-#    returns {callId, dispatchId, ambulanceId, hospitalId, severity, route, patientSummary}
-
-# A second request from the same spot correctly skips the now-busy ambulance
-# (confirmed: picked AMB-02 after the first took AMB-01)
-
-# Driver shares real GPS -> caller's open map marker moves live (confirmed in
-# two browser tabs: opening /driver/<dispatchId>, sharing location, and
-# watching the marker move on the caller's page with zero refresh)
-curl -X POST localhost:4000/dispatch/<dispatchId>/location -d '{"lat":13.05,"lng":80.24}'
-
-# Hospital declines -> auto-reroutes to the next-nearest hospital, recomputes
-# the route, and the caller's open status page updates live (confirmed: the
-# page re-rendered "<hospital A> couldn't accept — finding another
-# hospital..." then "Now heading to <hospital B>" with a new route on the
-# map, no refresh)
-curl -X POST localhost:4000/dispatch/<dispatchId>/respond -H "Authorization: Bearer <hospital JWT>" \
-  -d '{"decision":"DECLINE"}'
-
-# Frees the ambulance back up for the next emergency
-curl -X POST localhost:4000/dispatch/<dispatchId>/complete -H "Authorization: Bearer <staff JWT>"
+docker compose up -d          # postgres, redis, api on :4000
+cd apps/web-dashboard && npm install && npm run dev
 ```
 
-## The original staff-triggered flow, still verified (no dashboard fronts this — `curl` only)
+## Demo plan (for judging)
 
-```bash
-TOKEN=$(curl -sS -X POST localhost:4000/auth/login -H "Content-Type: application/json" \
-  -d '{"username":"disp1","role":"dispatcher"}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+The single most convincing moment: trigger two ambulances converging on one
+junction live and show the dashboard re-rank them and grant only one.
 
-curl -X POST localhost:4000/calls -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-  -d '{"location":"Anna Nagar","originLat":13.0850,"originLng":80.2101,"hospitalId":"<hospitalId — see GET /routing/hospitals>","severity":"RED","notes":"cardiac arrest"}'
+1. Seed 3–4 fake ambulances with GPS replay scripts (CSV of lat/lng played
+   back on a timer) so the live map moves during the demo
+2. Mock ITMS as a lightweight WebSocket service that logs
+   `"signal pre-empted at junction X"` — the point is proving the
+   auth/arbitration logic runs, not controlling real traffic lights
+3. Walk through: call intake → severity tag → live routing → two
+   ambulances hit the same junction → conflict resolution engine ranks
+   them → signed signal command → hospital gets advance alert
 
-curl -X POST localhost:4000/dispatch -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-  -d '{"ambulanceId":"AMB-01","severity":"RED","hospitalId":"<hospitalId>","callId":"<id from above>"}'
+## Build phases
 
-curl -X POST localhost:4000/junctions/J2/preempt -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-  -d '{"dispatchId":"<id from above>","etaSeconds":20}'
-# A second, lower-severity dispatch requesting the same junction within the
-# ~5s arbitration window loses — reason: HIGHER_SEVERITY — logged to Postgres.
+1. **Phase 1 — Core loop**: call intake, severity scoring, single-ambulance
+   routing, mock signal pre-emption (no conflict resolution yet)
+2. **Phase 2 — Conflict resolution**: junction claims in Redis, scoring
+   algorithm, queued arbitration
+3. **Phase 3 — Trust layer**: HMAC dispatch signing, signature verification
+   at the signal command service
+4. **Phase 4 — Consent & records**: ABHA token flow, hospital advance
+   alerts with patient summary
+5. **Phase 5 — Demo polish**: GPS replay seed data, live dashboard,
+   trip logging for the "log & learn" loop
 
-curl localhost:4000/trips/<dispatchId> -H "Authorization: Bearer $TOKEN"
-```
+## Team
 
-RED beat AMBER on a contested junction (`reason: HIGHER_SEVERITY`), a forged/unknown dispatch ID
-was rejected (`UNKNOWN_DISPATCH`), and trip rows had `junctionsCleared`/`arbitrationsInvolved`
-jsonb columns populated — confirmed via `psql`. The `arbitration:decided`/`junction:state`
-Socket.IO events themselves were confirmed emitting live (there's no dashboard rendering them
-anymore — the earlier staff Police console this was verified on was removed once the caller flow
-made it redundant; a Socket.IO client or `read_network_requests`-style tooling is how you'd watch
-these events today).
-
-## What's real vs. stubbed
-
-**Fully working, tested against live infra:**
-- Auth (JWT issuance + role claim, `apps/api/app/auth/`)
-- **Public emergency intake** (`apps/api/app/emergency/`) — symptom picklist → deterministic severity mapping, nearest-*available*-ambulance selection (excludes ambulances on an `ACTIVE` dispatch — confirmed a second request correctly skips a busy one), nearest-hospital selection, all via real haversine distance over a seeded `hospitals` Postgres table and a static `AMBULANCES` fleet (`app/routing/service.py`)
-- **Patient summary generation** (`apps/api/app/emergency/summary_service.py`) — calls Gemini (`gemini-2.5-flash`) for a short ER handoff brief from the structured intake; falls back to a deterministic template if `GEMINI_API_KEY` is unset, same resilience pattern as routing/notify
-- **Emailed hospital report** (`apps/api/app/notify/service.py::send_email`, wired from `dispatch/service.py`) — whenever a hospital is assigned or reassigned, the patient summary + ambulance/severity/ETA is emailed to that hospital's seeded contact address via SMTP; no-ops with a logged warning if `SMTP_*` isn't configured; confirmed live with real SMTP credentials configured — see the safety note below on the seed contact data
-- **Hospital accept/decline + auto-reroute** (`POST /dispatch/{id}/respond`) — decline picks the next-nearest hospital (excluding every hospital already declined for that trip), recomputes the route, re-emails the new hospital, and re-emits — confirmed live end-to-end in two browser tabs
-- **Live ambulance GPS** — a public driver-tracker page (`/driver/:dispatchId`) shares real `navigator.geolocation` via `POST /dispatch/{id}/location`, relayed through Redis (30s TTL) and Socket.IO's `location:update`, rendered as a moving marker on a real Leaflet/OpenStreetMap map — confirmed live: opened the driver page in one tab, the caller's map marker moved in another, zero refresh
-- Call intake, dispatch creation + HMAC signing (Postgres-backed, `apps/api/app/calls/`, `apps/api/app/dispatch/`)
-- Junction pre-emption + severity/ETA arbitration (Redis-backed state, Postgres-verified signatures, `apps/api/app/junctions/`)
-- Trip logging (Postgres jsonb, `apps/api/app/trips/`)
-- **Fastest-route computation** (`apps/api/app/routing/`) — every dispatch computes a real driving route (distance, duration, turn-by-turn geometry). Uses Mapbox Directions when `MAPBOX_TOKEN` is set (confirmed live — `source: "mapbox"`), falling back to OSRM's public routing server (confirmed live — `source: "osrm"`), falling back to a deterministic mock only if neither responds.
-- **SMS alerts via Twilio** (`apps/api/app/notify/service.py`) — set `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` and pass `notifyPhone` on `POST /dispatch`; runs off the event loop (`asyncio.to_thread`), a send failure is caught and logged rather than failing the dispatch
-- Socket.IO layer (`dispatch:created`, `dispatch:rerouted`, `hospital:responded`, `location:update`, `junction:state`, `arbitration:decided` — all confirmed emitting and rendering live)
-- Web dashboard (`apps/web-dashboard`) — public Emergency Request + Driver Tracker pages, all live-updating via Socket.IO. This is the entire frontend now — see "Removed" below.
-
-**Still stubbed / broken:**
-- `apps/api/app/notify/service.py::send_push` (FCM) — calls Google's *legacy* FCM HTTP endpoint, which **Google decommissioned in June 2024**. Setting `FCM_SERVER_KEY` will not make this work — needs rewriting against the FCM HTTP v1 API (service account JSON + OAuth2). Not wired into any endpoint either.
-- No native driver app (`apps/driver-app`) — the web-based `/driver/:dispatchId` page is this demo's stand-in.
-
-**Removed:** the Dispatcher/Police/Hospital staff dashboards and `/login` were deliberately deleted
-from `apps/web-dashboard` once the caller flow made manual staff-driven entry redundant for this
-demo (`AuthContext`, `authStore`, `AppShell`, `SeverityBadge`, `JunctionCard`, `TripTimeline` went
-with them — nothing else referenced them). The backend endpoints they drove are untouched and
-still covered by the `curl` flow above; only the UI is gone. Rebuilding a staff console is a matter
-of re-adding pages that call the existing, working API — no backend work required.
-
-**Safety note on hospital contact details:** the seeded `hospitals` rows are fictional demo
-entities, not real hospitals, and every seed row intentionally shares one real test inbox for
-`email` — the point of this seed set is to let the report-email feature be verified end to end by
-whoever owns that inbox. Never repeat this pattern with a real hospital's name paired with contact
-details that aren't actually that hospital's own — for a real deployment, `email`/`phone` must be
-each hospital's genuine, verified contact, sourced from a real registry, not seeded in code.
-
-**Important — running via Docker:** `docker-compose.yml` uses `env_file: apps/api/.env` for the `api` service (falls back to defaults if the file doesn't exist), overriding only `DATABASE_URL`/`REDIS_URL` to point at the in-network `postgres`/`redis` hostnames. Fill in `apps/api/.env` (copy from `.env.example`) — `docker compose up --build` picks it up automatically.
-
-## Tests
-
-```bash
-cd apps/api
-pytest
-# arbitration.py (severity/ETA tiebreak), hmac_util.py (sign/verify + tamper
-# detection), and haversine/nearest-selection + symptom->severity mapping
-```
-
-## Next pieces
-
-- Swap `Base.metadata.create_all` in `apps/api/app/main.py` for real Alembic migrations before anything beyond hackathon demo use
-- `router.project-osrm.org` is OSRM's free public demo instance — fine for a demo, but rate-limited and "not for production use" per OSRM's own terms; swap `OSRM_BASE_URL` for a self-hosted `osrm-backend` container before any real deployment
-- The tiny 5-hospital / 5-ambulance seed fleet is demo-scale — a real deployment pulls both from live registries instead of `app/routing/service.py`'s static seed data, with each hospital's own real contact details rather than one shared demo inbox
-- No staff UI exists to drive the dispatcher/police/hospital endpoints interactively anymore (see "Removed" above) — reintroduce pages only if a staff-facing demo is needed again; the API underneath is unchanged
+resQ Siren — Smart India Hackathon 2026, PS ID 25132

@@ -4,10 +4,24 @@ apps/api/__pycache__/
 apps/api/**/__pycache__/
 apps/api/.pytest_cache/
 apps/api/.env
+.venv-platform/
+**/__pycache__/
+**/.pytest_cache/
+**/*.egg-info/
+services/*/.env
 
 # Node
 apps/web-dashboard/node_modules/
 apps/web-dashboard/dist/
+apps/dispatcher-console/node_modules/
+apps/dispatcher-console/dist/
+apps/dispatcher-console/.env
+apps/driver-app/node_modules/
+apps/driver-app/dist/
+apps/driver-app/.env
+apps/hospital-dashboard/node_modules/
+apps/hospital-dashboard/dist/
+apps/hospital-dashboard/.env
 
 # OS
 .DS_Store
