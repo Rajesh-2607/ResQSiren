@@ -1,3 +1,5 @@
+import { API_BASE_URL } from "./config";
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
@@ -13,7 +15,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set("Content-Type", "application/json");
 
-  const res = await fetch(path, { ...options, headers });
+  const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
 
