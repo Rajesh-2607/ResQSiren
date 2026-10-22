@@ -1,9 +1,11 @@
 import socketio
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from app.auth.router import router as auth_router
 from app.calls.router import router as calls_router
+from app.config import settings
 from app.db import Base, SessionLocal, engine
 from app.dispatch.router import router as dispatch_router
 from app.emergency.router import router as emergency_router
@@ -15,6 +17,16 @@ from app.routing.service import HOSPITAL_SEED
 from app.trips.router import router as trips_router
 
 fastapi_app = FastAPI(title="resQ Siren API")
+
+# Required once the frontend is served from another origin; the dev proxy makes
+# local requests same-origin, which is why this was not needed before.
+fastapi_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 fastapi_app.include_router(auth_router)
 fastapi_app.include_router(calls_router)

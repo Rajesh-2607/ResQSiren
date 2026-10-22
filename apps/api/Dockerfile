@@ -9,4 +9,5 @@ COPY app ./app
 
 EXPOSE 4000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "4000"]
+# Honour $PORT when the platform injects one (Render/Cloud Run); 4000 locally.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-4000}"]
